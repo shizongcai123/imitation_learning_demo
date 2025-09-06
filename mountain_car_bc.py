@@ -7,12 +7,55 @@ from torch.optim import Adam
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
-
 device = torch.device('cpu')
 
-def collect_human_demos(num_demos):
+class PerturbedMountainCarEnv(gym.Wrapper):
+    def __init__(self, env, noise_std=0.05, perturb_prob=0.3):
+        """
+        The MountainCar environment with random perturbation
+        Args:
+            env: gym env
+            noise_std: standard deviation of state observation noise
+            perturb_prob: The probability of applying the perturbation by each step
+        """
+        super().__init__(env)
+        self.noise_std = noise_std
+        self.perturb_prob = perturb_prob
+        self.original_step = self.env.step
+        
+    def step(self, action):
+
+        if np.random.random() < self.perturb_prob:
+            # choosing action randomly
+            perturbed_action = np.random.choice([0, 1, 2])
+            obs, reward, terminated, truncated, info = self.original_step(perturbed_action)
+        else:
+            obs, reward, terminated, truncated, info = self.original_step(action)
+        
+        # perturbation on observation
+        # obs = obs + np.random.normal(0, self.noise_std, obs.shape)
+            
+        return obs, reward, terminated, truncated, info
+    
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
+def create_env(perturbed=False, render_mode='rgb_array', max_steps=500, noise_std=0.05, perturb_prob=0.3):
+
+    env = gym.make("MountainCar-v0", render_mode=render_mode, max_episode_steps=max_steps)
+    
+    if perturbed:
+        env = PerturbedMountainCarEnv(
+            env, 
+            noise_std=noise_std, 
+            perturb_prob=perturb_prob,
+        )
+    
+    return env
+
+
+def collect_human_demos(num_demos, env):
     mapping = {(pygame.K_LEFT,): 0, (pygame.K_RIGHT,): 2}
-    env = gym.make("MountainCar-v0",render_mode='rgb_array') 
     demos = collect_demos(env, keys_to_action=mapping, num_demos=num_demos, noop=1)
     return demos
 
@@ -21,7 +64,7 @@ def torchify_demos(sas_pairs):
     actions = []
     next_states = []
     for s, a, s2 in sas_pairs:
-        # Gymnasium返回的是(obs, info)，只取obs
+        # in some env, the return will be tuple of {obs, info}
         if isinstance(s, tuple):
             s = s[0]
         if isinstance(s2, tuple):
@@ -34,15 +77,14 @@ def torchify_demos(sas_pairs):
     obs_torch = torch.from_numpy(np.stack(states)).float().to(device)
     acs_torch = torch.from_numpy(np.array(actions)).long().to(device)
     obs2_torch = torch.from_numpy(np.stack(next_states)).float().to(device)
-
     return obs_torch, acs_torch, obs2_torch
 
 def train_policy(obs, acs, nn_policy, num_train_iters):
-    """Train the behavoir cloning policy.
+    """Train the behavior cloning policy.
 
     Args:
         obs: The observation
-        acs: The actions
+        acs: The index of actions
         nn_policy: The network of policy
         num_train_iters: The number of iterations
     """
@@ -53,6 +95,8 @@ def train_policy(obs, acs, nn_policy, num_train_iters):
     for i in range(num_train_iters):
         optimizer.zero_grad()
         logits = nn_policy(obs)
+        # print(f"logits: {logits.shape}")
+        # print(f"acs index: {acs.shape}")
         loss = criterion(logits, acs)
         loss.backward()
         optimizer.step()
@@ -63,6 +107,8 @@ def train_policy(obs, acs, nn_policy, num_train_iters):
 class PolicyNetwork(nn.Module):
     '''
         Neural network: 3 hidden layers, 128 neurons per layer, ReLU activation function
+        input: (prev_obs, action, obs)
+        output: probability of action
     '''
     def __init__(self):
         super().__init__()
@@ -83,13 +129,12 @@ class PolicyNetwork(nn.Module):
         logits = self.fc4(x)
         return logits
 
+def noisy_obs(obs, noise_std=0.01):
+    return obs + np.random.normal(0, noise_std, size=obs.shape)
+
 
 #evaluate learned policy
-def evaluate_policy(pi, num_evals, human_render=True):
-    if human_render:
-        env = gym.make("MountainCar-v0",render_mode='human') 
-    else:
-        env = gym.make("MountainCar-v0") 
+def evaluate_policy(pi, num_evals, env):
 
     policy_returns = []
     for i in range(num_evals):
@@ -97,10 +142,8 @@ def evaluate_policy(pi, num_evals, human_render=True):
         total_reward = 0
         obs, _ = env.reset()
         while not done:
-            #take the action that the network assigns the highest logit value to
-            #Note that first we convert from numpy to tensor and then we get the value of the 
-            #argmax using .item() and feed that into the environment
-            obs_tensor = torch.from_numpy(np.array(obs)).float().unsqueeze(0)
+            noisy_observation = noisy_obs(np.array(obs), noise_std=0.02)
+            obs_tensor = torch.from_numpy(np.array(noisy_observation)).float().unsqueeze(0)
             action = torch.argmax(pi(obs_tensor)).item()
             # print(action)
             obs, rew, terminated, truncated, info = env.step(action)
@@ -119,11 +162,13 @@ if __name__ == "__main__":
     parser.add_argument('--num_demos', default = 1, type=int, help="number of human demonstrations to collect")
     parser.add_argument('--num_bc_iters', default = 100, type=int, help="number of iterations to run BC")
     parser.add_argument('--num_evals', default=6, type=int, help="number of times to run policy after training for evaluation")
+    parser.add_argument('--enable_perturb', default=False, type=bool, help="if enable perturbation for action and observation")
+    parser.add_argument('--env_max_step', default=500, type=int, help="max step limitation to env")
 
     args = parser.parse_args()
-
+    env = create_env(perturbed=args.enable_perturb, max_steps = args.env_max_step)
     #collect human demos
-    demos = collect_human_demos(args.num_demos)
+    demos = collect_human_demos(args.num_demos, env)
 
     #process demos
     obs, acs, _ = torchify_demos(demos)
@@ -132,6 +177,7 @@ if __name__ == "__main__":
     pi = PolicyNetwork()
     train_policy(obs, acs, pi, args.num_bc_iters)
 
+    env = create_env(perturbed=args.enable_perturb, max_steps = args.env_max_step, render_mode='human')
     #evaluate learned policy
-    evaluate_policy(pi, args.num_evals)
+    evaluate_policy(pi, args.num_evals, env)
 

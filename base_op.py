@@ -1,14 +1,7 @@
-"""Utilities of visualising an environment."""
-from collections import deque
 from typing import Callable, Dict, List, Optional, Tuple, Union
-
 import numpy as np
-import gymnasium.error
 from gymnasium import Env, logger
-from gymnasium.core import ActType, ObsType
-from gymnasium.error import DependencyNotInstalled
-from gymnasium.logger import deprecation
-
+from gymnasium.core import ActType
 
 import pygame
 from pygame import Surface
@@ -142,7 +135,7 @@ def collect_demos(
     game = PlayableGame(env, key_code_to_action, zoom)
 
     if fps is None:
-        fps = env.metadata.get("render_fps", 30)
+        fps = env.metadata.get("render_fps", 300)
 
     done = False
     
@@ -164,6 +157,7 @@ def collect_demos(
             action = key_code_to_action.get(tuple(sorted(game.pressed_keys)), noop)
             prev_obs = obs
             obs, rew, terminated, truncated, info = env.step(action)
+            # print(f"terminated: {terminated}, truncated: {truncated}")
             done = terminated or truncated
             sas_pairs.append((prev_obs, action, obs))
             total_reward += rew
